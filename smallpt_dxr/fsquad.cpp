@@ -5,6 +5,7 @@
 #pragma comment(lib, "d3dcompiler.lib")
 
 extern int WIN_W, WIN_H;
+extern int g_frame_count;
 
 // CE = Check Error
 #define CE(call) \
@@ -25,9 +26,15 @@ void FullScreenQuad::Init(ID3D12Device* device) {
   // Rootsig
   // Root params for drawing the FSQUAD
   {
-    D3D12_ROOT_PARAMETER root_params[1]{};
+    D3D12_ROOT_PARAMETER root_params[2]{};
     root_params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     root_params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    
+    root_params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    root_params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    root_params[1].Constants.Num32BitValues = 1;
+    root_params[1].Constants.RegisterSpace = 0;
+    root_params[1].Constants.ShaderRegister = 0;  // register(c0)
 
     D3D12_DESCRIPTOR_RANGE desc_ranges[1]{};
     desc_ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;  // RT output viewed as SRV
@@ -56,7 +63,7 @@ void FullScreenQuad::Init(ID3D12Device* device) {
 
     D3D12_ROOT_SIGNATURE_DESC rootsig_desc{};
     rootsig_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-    rootsig_desc.NumParameters = 1;
+    rootsig_desc.NumParameters = _countof(root_params);
     rootsig_desc.pParameters = root_params;
     rootsig_desc.NumStaticSamplers = 1;
     rootsig_desc.pStaticSamplers = &sampler_desc;
@@ -187,7 +194,7 @@ void FullScreenQuad::CreateSRVForBuffer(ID3D12Device* device, ID3D12Resource* b)
   D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc{};
   srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
   srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-  srv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  srv_desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
   srv_desc.Texture2D.MipLevels = 1;
   srv_desc.Texture2D.MostDetailedMip = 0;
   D3D12_CPU_DESCRIPTOR_HANDLE srv_handle(srv_uav_cbv_heap->GetCPUDescriptorHandleForHeapStart());
@@ -214,6 +221,7 @@ void FullScreenQuad::Render(ID3D12GraphicsCommandList4* command_list) {
   scissor.top = 0;
   scissor.right = WIN_W;
   scissor.bottom = WIN_H;
+  command_list->SetGraphicsRoot32BitConstant(1, g_frame_count, 0);
   command_list->RSSetViewports(1, &viewport);
   command_list->RSSetScissorRects(1, &scissor);
   command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);

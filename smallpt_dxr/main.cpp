@@ -1,6 +1,7 @@
 #include <stdio.h>
 
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <GLFW/glfw3.h>
@@ -59,12 +60,29 @@ ID3D12RootSignature* g_global_rootsig{};
 ID3D12StateObject*   g_rt_state_object{};
 ID3D12StateObjectProperties* g_rt_state_object_props;
 ID3D12Resource*      g_rt_output_resource;
+ID3D12Resource*      g_rt_scratch_resource;
 
-ID3D12Resource* g_sbt_storage{};
+ID3D12Resource*      g_sbt_storage{};
+
+ID3D12Resource*      d_raygen_cb;
+ID3D12Resource*      d_fsquad_cb;
+
+int                  g_frame_count{ 0 };
+
+struct RayGenCB {
+  int frame_count;
+};
+
+struct FSQuadCB {
+  int frame_count;
+};
 
 struct SphereInfo {
   float radius;
   glm::vec3 pos;
+  glm::vec3 emission;
+  glm::vec3 color;
+  int material;
 };
 
 void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods)
@@ -233,7 +251,7 @@ void InitDX12Stuff() {
   D3D12_RESOURCE_DESC desc{};
   desc.DepthOrArraySize = 1;
   desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-  desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
   desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   desc.Width = RT_W;
   desc.Height = RT_H;
@@ -255,6 +273,52 @@ void InitDX12Stuff() {
   uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
   D3D12_CPU_DESCRIPTOR_HANDLE      handle(g_srv_uav_cbv_heap->GetCPUDescriptorHandleForHeapStart());
   g_device12->CreateUnorderedAccessView(g_rt_output_resource, nullptr, &uav_desc, handle);
+
+  desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  desc.Format = DXGI_FORMAT_UNKNOWN;
+  desc.Width = RT_W * RT_H * sizeof(int);
+  desc.Height = 1;
+  desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  CE(g_device12->CreateCommittedResource(
+    &props, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&g_rt_scratch_resource)));
+  g_rt_scratch_resource->SetName(L"RT scratch resource");
+  handle.ptr += 4 * g_srv_uav_cbv_descriptor_size;
+
+  uav_desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+  uav_desc.Buffer.NumElements = RT_W * RT_H;
+  uav_desc.Buffer.StructureByteStride = sizeof(int);
+  g_device12->CreateUnorderedAccessView(g_rt_scratch_resource, nullptr, &uav_desc, handle);
+
+  // CB
+  D3D12_RESOURCE_DESC cb_desc{};
+  cb_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  cb_desc.Alignment = 0;
+  cb_desc.Width = 256;
+  cb_desc.Height = 1;
+  cb_desc.DepthOrArraySize = 1;
+  cb_desc.MipLevels = 1;
+  cb_desc.Format = DXGI_FORMAT_UNKNOWN;
+  cb_desc.SampleDesc.Count = 1;
+  cb_desc.SampleDesc.Quality = 0;
+  cb_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  cb_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+  D3D12_HEAP_PROPERTIES heap_props{};
+  heap_props.Type = D3D12_HEAP_TYPE_UPLOAD;
+  heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+  heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+  heap_props.CreationNodeMask = 1;
+  heap_props.VisibleNodeMask = 1;
+  CE(g_device12->CreateCommittedResource(
+    &heap_props, D3D12_HEAP_FLAG_NONE, &cb_desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&d_raygen_cb)));
+  d_raygen_cb->SetName(L"RayGen CB");
+
+  D3D12_CPU_DESCRIPTOR_HANDLE cbv_handle(g_srv_uav_cbv_heap->GetCPUDescriptorHandleForHeapStart());
+  cbv_handle.ptr += 3 * g_srv_uav_cbv_descriptor_size;
+  D3D12_CONSTANT_BUFFER_VIEW_DESC cbv_desc{};
+  cbv_desc.BufferLocation = d_raygen_cb->GetGPUVirtualAddress();
+  cbv_desc.SizeInBytes = 256;
+  g_device12->CreateConstantBufferView(&cbv_desc, cbv_handle);
 }
 
 void CreateRTPipeline() {
@@ -263,7 +327,7 @@ void CreateRTPipeline() {
     D3D12_ROOT_PARAMETER root_params[1];
     root_params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
 
-    D3D12_DESCRIPTOR_RANGE desc_ranges[2]{};
+    D3D12_DESCRIPTOR_RANGE desc_ranges[4]{};
     desc_ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;  // Output
     desc_ranges[0].NumDescriptors = 1;
     desc_ranges[0].BaseShaderRegister = 0;
@@ -275,6 +339,18 @@ void CreateRTPipeline() {
     desc_ranges[1].BaseShaderRegister = 0;
     desc_ranges[1].RegisterSpace = 0;
     desc_ranges[1].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    desc_ranges[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+    desc_ranges[2].NumDescriptors = 1;
+    desc_ranges[2].BaseShaderRegister = 0;
+    desc_ranges[2].RegisterSpace = 0;
+    desc_ranges[2].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    desc_ranges[3].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;  // Scratch
+    desc_ranges[3].NumDescriptors = 1;
+    desc_ranges[3].BaseShaderRegister = 1;
+    desc_ranges[3].RegisterSpace = 0;
+    desc_ranges[3].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
     root_params[0].DescriptorTable.pDescriptorRanges = desc_ranges;
     root_params[0].DescriptorTable.NumDescriptorRanges = _countof(desc_ranges);
@@ -328,7 +404,7 @@ void CreateRTPipeline() {
 
     // 2. Shader Config
     D3D12_RAYTRACING_SHADER_CONFIG shader_config{};
-    shader_config.MaxAttributeSizeInBytes = 8;   // float2 bary
+    shader_config.MaxAttributeSizeInBytes = 12;   // normal
     shader_config.MaxPayloadSizeInBytes = 16;  // float4 color
     D3D12_STATE_SUBOBJECT subobj_shaderconfig{};
     subobj_shaderconfig.Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG;
@@ -343,7 +419,7 @@ void CreateRTPipeline() {
 
     // 4. Pipeline config
     D3D12_RAYTRACING_PIPELINE_CONFIG pipeline_config{};
-    pipeline_config.MaxTraceRecursionDepth = 1;
+    pipeline_config.MaxTraceRecursionDepth = 3;
     D3D12_STATE_SUBOBJECT subobj_pipeline_config{};
     subobj_pipeline_config.Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG;
     subobj_pipeline_config.pDesc = &pipeline_config;
@@ -408,33 +484,28 @@ void CreateShaderBindingTable() {
 void CreateAS() {
   std::vector<D3D12_RAYTRACING_AABB> aabbs;
 
-  struct RadAndPos {
-    float r;
-    glm::vec3 p;
-  };
-
   // Each of the sphere becomes a Geometry
-  RadAndPos spheres[] = {
-    {1e5, glm::vec3(1e5 + 1,40.8,81.6) },
-    {1e5, glm::vec3(-1e5 + 99,40.8,81.6) },
-    {1e5, glm::vec3(50,40.8, 1e5) },
-    {1e5, glm::vec3(50,40.8,-1e5 + 170) },
-    {1e5, glm::vec3(50, 1e5, 81.6) },
-    {1e5, glm::vec3(50,-1e5 + 81.6,81.6) },
-    {16.5,glm::vec3(27,16.5,47) },
-    {16.5,glm::vec3(73,16.5,78) },
-    {600, glm::vec3(50,681.6 - .27,81.6) }
+  SphereInfo spheres[] = {
+    {1e5, glm::vec3(1e5 + 1,40.8,81.6),   glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.75, 0.25, 0.25), 0 },
+    {1e5, glm::vec3(-1e5 + 99,40.8,81.6), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.25, 0.25, 0.75), 0 },
+    {1e5, glm::vec3(50,40.8, 1e5),        glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.75, 0.75, 0.75), 0},
+    {1e5, glm::vec3(50,40.8,-1e5 + 170),  glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0, 0, 0), 0 },
+    {1e5, glm::vec3(50, 1e5, 81.6),       glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.75, 0.75, 0.75), 0 },
+    {1e5, glm::vec3(50,-1e5 + 81.6,81.6), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.75, 0.75, 0.75), 0 },
+    {16.5,glm::vec3(27,16.5,47),          glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.999, 0.999, 0.999), 1 },
+    {16.5,glm::vec3(73,16.5,78),          glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.999, 0.999, 0.999), 2 },
+    {600, glm::vec3(50,681.6 - .27,81.6), glm::vec3(12,12,12),         glm::vec3(0,0,0), 0 }
   };
 
   for (size_t i = 0; i < _countof(spheres); i++) {
-    RadAndPos& s = spheres[i];
+    SphereInfo& s = spheres[i];
     D3D12_RAYTRACING_AABB aabb{};
-    aabb.MinX = s.p.x - s.r;
-    aabb.MaxX = s.p.x + s.r;
-    aabb.MinY = s.p.y - s.r;
-    aabb.MaxY = s.p.y + s.r;
-    aabb.MinZ = s.p.z - s.r;
-    aabb.MaxZ = s.p.z + s.r;
+    aabb.MinX = s.pos.x - s.radius;
+    aabb.MaxX = s.pos.x + s.radius;
+    aabb.MinY = s.pos.y - s.radius;
+    aabb.MaxY = s.pos.y + s.radius;
+    aabb.MinZ = s.pos.z - s.radius;
+    aabb.MaxZ = s.pos.z + s.radius;
     aabbs.push_back(aabb);
   }
 
@@ -643,6 +714,16 @@ void CreateAS() {
 }
 
 void Render() {
+  // Update
+  RayGenCB cb{};
+  cb.frame_count = g_frame_count;
+  g_frame_count++;
+
+  char* mapped;
+  d_raygen_cb->Map(0, nullptr, (void**)&mapped);
+  memcpy(mapped, &cb, sizeof(RayGenCB));
+  d_raygen_cb->Unmap(0, nullptr);
+
   // Render
   D3D12_CPU_DESCRIPTOR_HANDLE handle_rtv(g_rtv_heap->GetCPUDescriptorHandleForHeapStart());
   handle_rtv.ptr += g_rtv_descriptor_size * g_frame_index;
@@ -722,6 +803,7 @@ int main() {
   while (!glfwWindowShouldClose(g_window))
   {
     Render();
+    glfwSetWindowTitle(g_window, (std::string("SmallPT DXR SPP=") + std::to_string(g_frame_count)).c_str());
     glfwPollEvents();
   }
 }

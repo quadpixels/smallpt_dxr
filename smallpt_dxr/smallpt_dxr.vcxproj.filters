@@ -29,6 +29,9 @@
     <None Include="shaders\shaders.hlsl">
       <Filter>Resource Files</Filter>
     </None>
+    <None Include="shaders\fsquad.hlsl">
+      <Filter>Resource Files</Filter>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="fsquad.hpp">

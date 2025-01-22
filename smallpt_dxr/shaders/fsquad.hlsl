@@ -15,6 +15,11 @@ struct PSOutput
     float4 color : SV_Target;
 };
 
+cbuffer FSQuadCB : register(b0)
+{
+    int frame_count;
+}
+
 Texture2D tex : register(t0);
 SamplerState the_sampler;
 
@@ -26,10 +31,17 @@ VSOutput VSMain(VSInput input)
     return output;
 }
 
+float3 toInt(float3 rgb)
+{
+    return pow(clamp(rgb, 0, 1), 1 / 2.2);
+}
+
 PSOutput PSMain(VSOutput input)
 {
     PSOutput output;
-    output.color = tex.Sample(the_sampler, input.texcoord.xy);
+    float w = (frame_count <= 0) ? 1 : 1.0f / frame_count;
+    output.color = tex.Sample(the_sampler, input.texcoord.xy) * w;
+    output.color.xyz = toInt(output.color.xyz);
     output.color.a = 1.0;
     return output;
 }
