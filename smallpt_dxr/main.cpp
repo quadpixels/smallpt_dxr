@@ -78,6 +78,7 @@ glm::vec3 g_cam_dir = glm::normalize(glm::vec3(0, -0.042612, -1));
 glm::vec3 g_cx = { WIN_W * 0.5135f / WIN_H, 0, 0 };
 glm::vec3 g_cy = glm::normalize(glm::cross(g_cx, g_cam_dir)) * 0.5135f;
 int g_recursion_depth = 5;
+int g_nsamp = 1;
 
 struct RayGenCB {
   int frame_count;
@@ -86,6 +87,7 @@ struct RayGenCB {
   glm::vec3 cx; float pad2;
   glm::vec3 cy; float pad3;
   int recursion_depth;
+  int nsamp;
 };
 
 struct FSQuadCB {
@@ -304,6 +306,7 @@ void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
     case GLFW_KEY_7:
     case GLFW_KEY_8:
     case GLFW_KEY_9: SetSceneAndCreateAS(key - GLFW_KEY_1); break;
+    case GLFW_KEY_SPACE: g_nsamp = 10; break;
     default: break;
     }
   }
@@ -315,6 +318,7 @@ void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
     case GLFW_KEY_A: g_axes[0] = 0; break;
     case GLFW_KEY_Q: g_axes[2] = 0; break;
     case GLFW_KEY_E: g_axes[2] = 0; break;
+    case GLFW_KEY_SPACE: g_nsamp = 1; break;
     }
   }
 }
@@ -952,17 +956,22 @@ void Render() {
   cb.cx = g_cx;
   cb.cy = g_cy;
   cb.recursion_depth = g_recursion_depth;
+  cb.nsamp = g_nsamp;
 
   char* mapped;
   d_raygen_cb->Map(0, nullptr, (void**)&mapped);
   memcpy(mapped, &cb, sizeof(RayGenCB));
-  d_raygen_cb->Unmap(0, nullptr);
+  D3D12_RANGE written_range{};
+  written_range.Begin = 0;
+  written_range.End = sizeof(RayGenCB);
+  d_raygen_cb->Unmap(0, &written_range);
 
   // Render
   D3D12_CPU_DESCRIPTOR_HANDLE handle_rtv(g_rtv_heap->GetCPUDescriptorHandleForHeapStart());
   handle_rtv.ptr += g_rtv_descriptor_size * g_frame_index;
 
   float bg_color[] = { 1.0f, 1.0f, 0.8f, 1.0f };
+  CE(g_command_allocator->Reset());  // Prevent memory leak
   CE(g_command_list->Reset(g_command_allocator, nullptr));
 
   D3D12_RESOURCE_BARRIER barrier_rtv{};
@@ -1023,11 +1032,12 @@ void Render() {
   g_command_list->ResourceBarrier(1, &barrier_rt_out);
 
   CE(g_command_list->Close());
+
   g_command_queue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&g_command_list);
   CE(g_swapchain->Present(1, 0));
   WaitForPreviousFrame();
 
-  g_frame_count++;
+  g_frame_count += g_nsamp;
 }
 
 int main() {
@@ -1046,7 +1056,9 @@ int main() {
   while (!glfwWindowShouldClose(g_window))
   {
     Render();
-    glfwSetWindowTitle(g_window, (std::string("SmallPT DXR SPP=") + std::to_string(g_frame_count)).c_str());
+    char title[100];
+    snprintf(title, 100, "SmallPT DXR SPP=%d", g_frame_count);
+    glfwSetWindowTitle(g_window, title);
     glfwPollEvents();
   }
 }

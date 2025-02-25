@@ -23,6 +23,7 @@ cbuffer RayGenCB : register(b0)
     float3 g_cy;
     int pad3;
     int g_recursion_depth;
+    int g_nsamp;
 }
 
 struct MyAttributes
@@ -177,22 +178,25 @@ void RayGen()
     LCGStep(s1, 1664525, 1013904223UL);
     seed.w = s1;
 
-    float r1 = 2 * HybridTaus(seed), dx = (r1 < 1) ? sqrt(r1) - 1 : 1 - sqrt(2 - r1);
-    float r2 = 2 * HybridTaus(seed), dy = (r2 < 1) ? sqrt(r2) - 1 : 1 - sqrt(2 - r2);
+    for (int n = 0; n < g_nsamp; n++)
+    {
+        float r1 = 2 * HybridTaus(seed), dx = (r1 < 1) ? sqrt(r1) - 1 : 1 - sqrt(2 - r1);
+        float r2 = 2 * HybridTaus(seed), dy = (r2 < 1) ? sqrt(r2) - 1 : 1 - sqrt(2 - r2);
 
-    float3 ray_d = cx * ((tid.x + 0.5f + dx) / dim.x - 0.5f) +
-                   cy * ((tid.y + 0.5f + dy) / dim.y - 0.5f) * (-1) + dir;
-    RayDesc ray;
-    ray.Origin = cam;
-    ray.Direction = normalize(ray_d);
-    ray.TMin = 0.0f;
-    ray.TMax = 1e20f;
-
-    float3 rad = TraceRadiance(ray, seed);
+        float3 ray_d = cx * ((tid.x + 0.5f + dx) / dim.x - 0.5f) +
+                       cy * ((tid.y + 0.5f + dy) / dim.y - 0.5f) * (-1) + dir;
+        RayDesc ray;
+        ray.Origin = cam;
+        ray.Direction = normalize(ray_d);
+        ray.TMin = 0.0f;
+        ray.TMax = 1e20f;
+        float3 rad = TraceRadiance(ray, seed);
     
-    RenderTarget[tid] += float4(rad, 1);
+        RenderTarget[tid] += float4(rad, 1);
 
-    s1 = seed.x ^ seed.y ^ seed.z ^ seed.w ^ frame_count;
+        s1 = seed.x ^ seed.y ^ seed.z ^ seed.w ^ (frame_count + n);
+    }
+    
     Scratch[tid.x + tid.y * dim.x] = s1;
 }
 
