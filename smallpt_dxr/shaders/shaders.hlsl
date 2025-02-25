@@ -15,6 +15,14 @@ StructuredBuffer<SphereInfo> Spheres : register(t1);
 cbuffer RayGenCB : register(b0)
 {
     int frame_count; // start from 0
+    float3 g_cam_pos;
+    float3 g_cam_dir;
+    int pad1;
+    float3 g_cx;
+    int pad2;
+    float3 g_cy;
+    int pad3;
+    int g_recursion_depth;
 }
 
 struct MyAttributes
@@ -50,11 +58,11 @@ float HybridTaus(inout uint4 seed)
   );
 }
 
-float3 TraceRadiance(RayDesc ray, inout uint4 seed, int depth)
+float3 TraceRadiance(RayDesc ray, inout uint4 seed)
 {
     float3 cl = { 0, 0, 0 };
     float3 cf = { 1, 1, 1 };
-    
+    int depth = 0;
     float seed1 = seed.x + seed.y * 720;
     
     while (true)
@@ -71,12 +79,11 @@ float3 TraceRadiance(RayDesc ray, inout uint4 seed, int depth)
         float3 nl = dot(n, ray.Direction) < 0 ? n : n * -1;
         float3 f = si.color;
         float p = f.x > f.y && f.x > f.z ? f.x : f.y > f.z ? f.y : f.z;
-
         cl = cl + cf * si.emission;
         
-        if (++depth > 5)
+        if (++depth > g_recursion_depth)
         {
-            if (HybridTaus(seed) < p)
+            if (depth < g_recursion_depth && HybridTaus(seed) < p)
             {
                 f = f * (1 / p);
             }
@@ -128,13 +135,13 @@ float3 TraceRadiance(RayDesc ray, inout uint4 seed, int depth)
             if (HybridTaus(seed) < P)
             {
                 cf = cf * RP;
-                ray.Origin = x + nl * 0.02f;
+                ray.Origin = x + nl * 0.01f;
                 ray.Direction = ray.Direction - n * 2 * dot(n, ray.Direction);
             }
             else
             {
                 cf = cf * TP;
-                ray.Origin = x - nl * 0.02f;
+                ray.Origin = x - nl * 0.01f;
                 ray.Direction = tdir;
             }
             continue;
@@ -148,10 +155,10 @@ void RayGen()
     uint2 tid = DispatchRaysIndex().xy;
     uint2 dim = DispatchRaysDimensions().xy;
     
-    float3 cam = { 50, 52, 295.6 };
-    float3 dir = normalize(float3(0, -0.042612, -1));
-    float3 cx = { dim.x * 0.5135f / dim.y, 0, 0 };
-    float3 cy = normalize(cross(cx, dir)) * 0.5135f;
+    float3 cam = g_cam_pos;
+    float3 dir = g_cam_dir;
+    float3 cx = g_cx;
+    float3 cy = g_cy;
 
     // rng
     uint4 seed;
@@ -176,14 +183,12 @@ void RayGen()
     float3 ray_d = cx * ((tid.x + 0.5f + dx) / dim.x - 0.5f) +
                    cy * ((tid.y + 0.5f + dy) / dim.y - 0.5f) * (-1) + dir;
     RayDesc ray;
-    ray.Origin = cam + ray_d * 140.0f;
+    ray.Origin = cam;
     ray.Direction = normalize(ray_d);
     ray.TMin = 0.0f;
-    ray.TMax = 10000.0f;
+    ray.TMax = 1e20f;
 
-
-    
-    float3 rad = TraceRadiance(ray, seed, 0);
+    float3 rad = TraceRadiance(ray, seed);
     
     RenderTarget[tid] += float4(rad, 1);
 

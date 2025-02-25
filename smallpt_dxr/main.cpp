@@ -1,5 +1,6 @@
 #include <stdio.h>
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -26,10 +27,11 @@
 FullScreenQuad g_fsquad;
 
 IDxcBlob* CompileShaderLibrary(LPCWSTR fileName);  // compile_shader_library.cpp
+void SetSceneAndCreateAS(int);
 
 GLFWwindow* g_window;
-int WIN_W = 720, WIN_H = 720;
-int RT_W = 720, RT_H = 720;
+int WIN_W = 800, WIN_H = 600;
+int RT_W = 800, RT_H = 600;
 #ifdef _DEBUG
 bool g_use_debug_layer{ true };
 #else
@@ -69,8 +71,21 @@ ID3D12Resource*      d_fsquad_cb;
 
 int                  g_frame_count{ 0 };
 
+std::vector<char> g_axes(3);  // XYZ
+glm::vec3 g_cam_pos = { 50, 52, 295.6 };
+//glm::vec3 g_cam_pos = { 50.0f, 40.8f, -860.0f };
+glm::vec3 g_cam_dir = glm::normalize(glm::vec3(0, -0.042612, -1));
+glm::vec3 g_cx = { WIN_W * 0.5135f / WIN_H, 0, 0 };
+glm::vec3 g_cy = glm::normalize(glm::cross(g_cx, g_cam_dir)) * 0.5135f;
+int g_recursion_depth = 5;
+
 struct RayGenCB {
   int frame_count;
+  glm::vec3 cam_pos;
+  glm::vec3 cam_dir; float pad1;
+  glm::vec3 cx; float pad2;
+  glm::vec3 cy; float pad3;
+  int recursion_depth;
 };
 
 struct FSQuadCB {
@@ -85,6 +100,185 @@ struct SphereInfo {
   int material;
 };
 
+struct SceneInfo {
+  int recursion_depth;
+  std::vector<SphereInfo> spheres;
+};
+
+glm::vec3 Cen(50.0f, 40.8f, -860.0f);
+std::vector<SceneInfo> g_scenes = {
+  { // Cornell Box
+    5,
+    {
+      {1e5, glm::vec3(1e5 + 1,40.8,81.6),   glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.75, 0.25, 0.25), 0 },
+      {1e5, glm::vec3(-1e5 + 99,40.8,81.6), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.25, 0.25, 0.75), 0 },
+      {1e5, glm::vec3(50,40.8, 1e5),        glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.75, 0.75, 0.75), 0},
+      {1e5, glm::vec3(50,40.8,-1e5 + 370),  glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0, 0, 0), 0 },
+      {1e5, glm::vec3(50, 1e5, 81.6),       glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.75, 0.75, 0.75), 0 },
+      {1e5, glm::vec3(50,-1e5 + 81.6,81.6), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.75, 0.75, 0.75), 0 },
+      {16.5,glm::vec3(27,16.5,47),          glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.999, 0.999, 0.999), 1 },
+      {16.5,glm::vec3(73,16.5,78),          glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.999, 0.999, 0.999), 2 },
+      {600, glm::vec3(50,681.6 - .27,81.6), glm::vec3(12,12,12),         glm::vec3(0,0,0), 0 }
+    }
+  },
+  { // Sky
+    5,
+    {
+      {1600, glm::vec3(1,0,2) * 3000.0f, glm::vec3(1.0f,.9,.8) * 1.2e1f * 1.56f * 2.0f, glm::vec3(0), 0}, // sun
+      {1560, glm::vec3(1,0,2) * 3500.0f, glm::vec3(1.0f,.5,.05) * 4.8e1f * 1.56f * 2.0f, glm::vec3(0),  0}, // horizon sun2
+      
+      {10000, Cen + glm::vec3(0,0,-200), glm::vec3(0.00063842, 0.02001478, 0.28923243), glm::vec3(.7,.7,1) * .25f,  0}, // sky
+
+      {100000, glm::vec3(50, -100000, 0), glm::vec3(), glm::vec3(.3,.3,.3), 0}, // grnd
+      {110000, glm::vec3(50, -110048.5, 0),  glm::vec3(.9,.5,.05) * 4.0f, glm::vec3(), 0},// horizon brightener
+      {4e4, glm::vec3(50, -4e4 - 30, -3000),  glm::vec3(),glm::vec3(.2,.2,.2),0},// mountains
+
+      {26.5, glm::vec3(22,26.5,42),   glm::vec3(),glm::vec3(1,1,1) * .596f, 1}, // white Mirr
+      {13, glm::vec3(75,13,82),   glm::vec3(),glm::vec3(.96,.96,.96) * .96f, 2},// Glas
+      {22, glm::vec3(87,22,24),   glm::vec3(),glm::vec3(.6,.6,.6) * .696f, 2}    // Glas2
+    }
+  },
+  {  // Night Sky
+    4,
+    {
+      {2.5e3,   glm::vec3(.82,.92,-2) * 1e4f,    glm::vec3(1,1,1) * .8e2f,     glm::vec3(), 0}, // moon
+      {2.5e4, glm::vec3(50, 0, 0),  glm::vec3(0.114, 0.133, 0.212) * 1e-2f,  glm::vec3(.216,.384,1) * 0.003f, 0}, // sky
+      {5e0,   glm::vec3(-.2,0.16,-1) * 1e4f, glm::vec3(1.00, 0.843, 0.698) * 1e2f,   glm::vec3(), 0},  // star
+      {5e0,   glm::vec3(0,  0.18,-1) * 1e4f, glm::vec3(1.00, 0.851, 0.710) * 1e2f,  glm::vec3(), 0},  // star
+      {5e0,   glm::vec3(.3, 0.15,-1) * 1e4f, glm::vec3(0.671, 0.780, 1.00) * 1e2f,   glm::vec3(), 0},  // star
+      {3.5e4,   glm::vec3(600,-3.5e4 + 1, 300), glm::vec3(),   glm::vec3(.6,.8,1) * .01f,  1},   //pool
+      {5e4,   glm::vec3(-500,-5e4 + 0, 0),   glm::vec3(),      glm::vec3(1,1,1) * .35f,  0},    //hill
+      {16.5,  glm::vec3(27,0,47),         glm::vec3(),              glm::vec3(1,1,1) * .33f, 0}, //hut
+      {7,     glm::vec3(27 + 8 * sqrt(2),0,47 + 8 * sqrt(2)),glm::vec3(),  glm::vec3(1,1,1) * .33f,  0}, //door
+      {500,   glm::vec3(-1e3,-300,-3e3), glm::vec3(),  glm::vec3(1,1,1) * .351f,    0},  //mnt
+      {830,   glm::vec3(0,   -500,-3e3), glm::vec3(),  glm::vec3(1,1,1) * .354f,    0},  //mnt
+      {490,  glm::vec3(1e3,  -300,-3e3), glm::vec3(),  glm::vec3(1,1,1) * .352f,    0},  //mnt
+    }
+  },
+  {  // Island
+    4,
+    {
+      {160,  Cen + glm::vec3(0, 600, -500),glm::vec3(1,1,1) * 2e2f, glm::vec3(),  0}, // sun
+      {800, Cen + glm::vec3(0,-880,-9120),glm::vec3(1,1,1) * 2e1f, glm::vec3(),  0}, // horizon
+      {10000,Cen + glm::vec3(0,0,-200), glm::vec3(0.0627, 0.188, 0.569) * 1e0f, glm::vec3(1,1,1) * .4f,  0}, // sky
+      {800, Cen + glm::vec3(0,-720,-200),glm::vec3(),  glm::vec3(0.110, 0.898, 1.00) * .996f,  1}, // water
+      {790, Cen + glm::vec3(0,-720,-200),glm::vec3(),  glm::vec3(.4,.3,.04) * .6f,    0}, // earth
+      {325, Cen + glm::vec3(0,-255,-50), glm::vec3(),  glm::vec3(.4,.3,.04) * .8f,       0}, // island
+      {275, Cen + glm::vec3(0,-205,-33), glm::vec3(),  glm::vec3(.02,.3,.02) * .75f,      0}, // grass
+    }
+  },
+  {  // Vista
+    5,
+    {
+      {8000, Cen + glm::vec3(0,-8000,-900),glm::vec3(1,.4,.1) * 5e-1f, glm::vec3(),  0}, // sun
+      {1e4,  Cen + glm::vec3(), glm::vec3(0.631, 0.753, 1.00) * 3e-1f, glm::vec3(1,1,1) * .5f,  0}, // sky
+
+      {150,  Cen + glm::vec3(-350,0, -100),glm::vec3(),  glm::vec3(1,1,1) * .3f,  0}, // mnt
+      {200,  Cen + glm::vec3(-210,0,-100), glm::vec3(),  glm::vec3(1,1,1) * .3f,  0}, // mnt
+      {145,  Cen + glm::vec3(-210,85,-100),glm::vec3(),  glm::vec3(1,1,1) * .8f,  0}, // snow
+      {150,  Cen + glm::vec3(-50,0,-100),  glm::vec3(),  glm::vec3(1,1,1) * .3f,  0}, // mnt
+      {150,  Cen + glm::vec3(100,0,-100),  glm::vec3(),  glm::vec3(1,1,1) * .3f,  0}, // mnt
+      {125,  Cen + glm::vec3(250,0,-100),  glm::vec3(),  glm::vec3(1,1,1) * .3f,  0}, // mnt
+      {150,  Cen + glm::vec3(375,0,-100),  glm::vec3(),  glm::vec3(1,1,1) * .3f,  0}, // mnt
+
+      {2500, Cen + glm::vec3(0,-2400,-500),glm::vec3(),  glm::vec3(1,1,1) * .1f,  0}, // mnt base
+
+      {8000, Cen + glm::vec3(0,-8000,200), glm::vec3(),  glm::vec3(.2,.2,1),    2}, // water
+      {8000, Cen + glm::vec3(0,-8000,1100),glm::vec3(),  glm::vec3(0,.3,0),     0}, // grass
+      {8   , Cen + glm::vec3(-75, -5, 850),glm::vec3(),  glm::vec3(0,.3,0),     0}, // bush
+      {7,    Cen + glm::vec3(-14,   23, 825),glm::vec3(),  glm::vec3(1,1,1) * .996f, 2}, // ball
+
+      {30,  Cen + glm::vec3(200,280,-400),  glm::vec3(),  glm::vec3(1,1,1) * .8f,  0},   // clouds
+      {37,  Cen + glm::vec3(237,280,-400),  glm::vec3(),  glm::vec3(1,1,1) * .8f,  0},   // clouds
+      {28,  Cen + glm::vec3(267,280,-400),  glm::vec3(),  glm::vec3(1,1,1) * .8f,  0},   // clouds
+
+      {40,  Cen + glm::vec3(150,280,-1000),  glm::vec3(),  glm::vec3(1,1,1) * .8f,  0},  // clouds
+      {37,  Cen + glm::vec3(187,280,-1000),  glm::vec3(),  glm::vec3(1,1,1) * .8f,  0},  // clouds
+
+      {40,  Cen + glm::vec3(600,280,-1100),  glm::vec3(),  glm::vec3(1,1,1) * .8f,  0},  // clouds
+      {37,  Cen + glm::vec3(637,280,-1100),  glm::vec3(),  glm::vec3(1,1,1) * .8f,  0},  // clouds
+
+      {37,  Cen + glm::vec3(-800,280,-1400),  glm::vec3(),  glm::vec3(1,1,1) * .8f,  0}, // clouds
+      {37,  Cen + glm::vec3(0,280,-1600),  glm::vec3(),  glm::vec3(1,1,1) * .8f,  0},    // clouds
+      {37,  Cen + glm::vec3(537,280,-1800),  glm::vec3(),  glm::vec3(1,1,1) * .8f,  0},  // clouds
+    }
+  },
+  {  // overlap --- needs to increase recursion depth
+    50,
+    {
+      {150, glm::vec3(50 + 75,28,62), glm::vec3(1,1,1) * 0e-3f, glm::vec3(1,.9,.8) * .93f, 2},
+      {28,  glm::vec3(50 + 5,-28,62), glm::vec3(1,1,1) * 1e1f, glm::vec3(1,1,1) * 0.0f, 0},
+      {300, glm::vec3(50,28,62), glm::vec3(1,1,1) * 0e-3f, glm::vec3(1,1,1) * .93f, 1}
+    }
+  },
+  {  // Wada
+    50,
+    {
+      #define R 60.0f
+      #define T (30 * 3.1415926 / 180.0f)
+      #define D (float(R / cos(T)))
+      #define Z 60.0f
+      {1e5, glm::vec3(50, 100, 0),      glm::vec3(1,1,1) * 3e0f, glm::vec3(), 0}, // sky
+      {1e5, glm::vec3(50, -1e5 - D - R, 0), glm::vec3(),     glm::vec3(.1,.1,.1), 0},           //grnd
+
+      {R, glm::vec3(50,40.8,62) + glm::vec3(cos(T),sin(T),0) * D, glm::vec3(), glm::vec3(1,.3,.3) * .999f, 1}, //red
+      {R, glm::vec3(50,40.8,62) + glm::vec3(-cos(T),sin(T),0) * D, glm::vec3(), glm::vec3(.3,1,.3) * .999f, 1}, //grn
+      {R, glm::vec3(50,40.8,62) + glm::vec3(0,-1,0) * D,         glm::vec3(), glm::vec3(.3,.3,1) * .999f, 1}, //blue
+      {R, glm::vec3(50,40.8,62) + glm::vec3(0,0,-1) * D,       glm::vec3(), glm::vec3(.53,.53,.53) * .999f, 1}, //back
+      {R, glm::vec3(50,40.8,62) + glm::vec3(0,0,1) * D,      glm::vec3(), glm::vec3(1,1,1) * .999f, 2}, //front
+      #undef R
+      #undef T
+      #undef D
+      #undef Z
+    }
+  },
+  {  // Wada2
+    30,
+    {
+      #define R 120.0f
+      #define T 30 * 3.1415926 / 180.0f
+      #define D (float(R / cos(T)))
+      #define Z 62
+      #define C glm::vec3(0.275, 0.612, 0.949)
+      {R, glm::vec3(50,28,Z) + glm::vec3(cos(T),sin(T),0) * D,    C * 6e-2f,glm::vec3(1,1,1) * .996f, 1}, //red
+      {R, glm::vec3(50,28,Z) + glm::vec3(-cos(T),sin(T),0) * D,    C * 6e-2f,glm::vec3(1,1,1) * .996f, 1}, //grn
+      {R, glm::vec3(50,28,Z) + glm::vec3(0,-1,0) * D,              C * 6e-2f,glm::vec3(1,1,1) * .996f, 1}, //blue
+      {R, glm::vec3(50,28,Z) + glm::vec3(0,0,-1) * R * 2.0f * sqrtf(2. / 3.),C * 0e-2f,glm::vec3(1,1,1) * .996f, 1}, //back
+      {2*2*R*2*sqrtf(2. / 3.) - R*2*sqrtf(2./3.)/3.f, glm::vec3(50,28,Z) + glm::vec3(0,0,-R * 2 * sqrt(2. / 3.) / 3.),   glm::vec3(1,1,1) * .0f,glm::vec3(1,1,1) * .5f, 1} //front
+      #undef R
+      #undef T
+      #undef D
+      #undef Z
+      #undef C
+    }
+  },
+  {  // Forest
+    30,
+    {
+      #define tc glm::vec3(0.0588, 0.361, 0.0941)
+      #define sc (glm::vec3(1,1,1)*.7f)
+      {1e5, glm::vec3(50, 1e5 + 130, 0),  glm::vec3(1,1,1) * 1.3f,glm::vec3(),0}, //lite
+      {1e2, glm::vec3(50, -1e2 + 2, 47),  glm::vec3(),glm::vec3(1,1,1) * .7f,0}, //grnd
+
+      {1e4, glm::vec3(50, -30, 300) + glm::vec3(-sin(50 * 3.14159f / 180), 0, cos(50 * 3.14159f / 180)) * 1e4f,  glm::vec3(), glm::vec3(1,1,1) * .99f, 1},// mirr L
+      {1e4, glm::vec3(50, -30, 300) + glm::vec3( sin(50 * 3.14159f / 180), 0, cos(50 * 3.14159f / 180)) * 1e4f,  glm::vec3(), glm::vec3(1,1,1) * .99f, 1},// mirr R
+      {1e4, glm::vec3(50, -30, -50) + glm::vec3(-sin(30 * 3.14159f / 180), 0,-cos(30 * 3.14159f / 180)) * 1e4f,  glm::vec3(), glm::vec3(1,1,1) * .99f, 1},// mirr FL
+      {1e4, glm::vec3(50, -30, -50) + glm::vec3( sin(30 * 3.14159f / 180), 0,-cos(30 * 3.14159f / 180)) * 1e4f,  glm::vec3(), glm::vec3(1,1,1) * .99f, 1},// mirr
+
+      {4, glm::vec3(50,6 * .6,47),   glm::vec3(),glm::vec3(.13,.066,.033), 0},//"tree"
+      {16,glm::vec3(50,6 * 2 + 16 * .6,47),   glm::vec3(), tc,  0},//"tree"
+      {11,glm::vec3(50,6 * 2 + 16 * .6 * 2 + 11 * .6,47),   glm::vec3(), tc,  0},//"tree"
+      {7, glm::vec3(50,6 * 2 + 16 * .6 * 2 + 11 * .6 * 2 + 7 * .6,47),   glm::vec3(), tc,  0},//"tree"
+
+      {15.5,glm::vec3(50,1.8 + 6 * 2 + 16 * .6,47),   glm::vec3(), sc,  0},//"tree"
+      {10.5,glm::vec3(50,1.8 + 6 * 2 + 16 * .6 * 2 + 11 * .6,47),   glm::vec3(), sc,  0},//"tree"
+      {6.5, glm::vec3(50,1.8 + 6 * 2 + 16 * .6 * 2 + 11 * .6 * 2 + 7 * .6,47),   glm::vec3(), sc,  0},//"tree"
+      #undef tc
+      #undef sc
+    }
+  }
+};
+
 void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods)
 {
   if (action == GLFW_PRESS)
@@ -95,7 +289,32 @@ void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
       exit(0);
       break;
     }
+    case GLFW_KEY_W: g_axes[1] = 1; break;
+    case GLFW_KEY_S: g_axes[1] = -1; break;
+    case GLFW_KEY_D: g_axes[0] = 1; break;
+    case GLFW_KEY_A: g_axes[0] = -1; break;
+    case GLFW_KEY_Q: g_axes[2] = -1; break;
+    case GLFW_KEY_E: g_axes[2] = 1; break;
+    case GLFW_KEY_1: 
+    case GLFW_KEY_2: 
+    case GLFW_KEY_3: 
+    case GLFW_KEY_4:
+    case GLFW_KEY_5:
+    case GLFW_KEY_6:
+    case GLFW_KEY_7:
+    case GLFW_KEY_8:
+    case GLFW_KEY_9: SetSceneAndCreateAS(key - GLFW_KEY_1); break;
     default: break;
+    }
+  }
+  else if (action == GLFW_RELEASE) {
+    switch (key) {
+    case GLFW_KEY_W: g_axes[1] = 0; break;
+    case GLFW_KEY_S: g_axes[1] = 0; break;
+    case GLFW_KEY_D: g_axes[0] = 0; break;
+    case GLFW_KEY_A: g_axes[0] = 0; break;
+    case GLFW_KEY_Q: g_axes[2] = 0; break;
+    case GLFW_KEY_E: g_axes[2] = 0; break;
     }
   }
 }
@@ -481,23 +700,14 @@ void CreateShaderBindingTable() {
   g_sbt_storage->SetName(L"RayGen SBT storage");
 }
 
-void CreateAS() {
+void SetSceneAndCreateAS(int idx) {
+  g_recursion_depth = g_scenes[idx].recursion_depth;
   std::vector<D3D12_RAYTRACING_AABB> aabbs;
 
   // Each of the sphere becomes a Geometry
-  SphereInfo spheres[] = {
-    {1e5, glm::vec3(1e5 + 1,40.8,81.6),   glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.75, 0.25, 0.25), 0 },
-    {1e5, glm::vec3(-1e5 + 99,40.8,81.6), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.25, 0.25, 0.75), 0 },
-    {1e5, glm::vec3(50,40.8, 1e5),        glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.75, 0.75, 0.75), 0},
-    {1e5, glm::vec3(50,40.8,-1e5 + 170),  glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0, 0, 0), 0 },
-    {1e5, glm::vec3(50, 1e5, 81.6),       glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.75, 0.75, 0.75), 0 },
-    {1e5, glm::vec3(50,-1e5 + 81.6,81.6), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.75, 0.75, 0.75), 0 },
-    {16.5,glm::vec3(27,16.5,47),          glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.999, 0.999, 0.999), 1 },
-    {16.5,glm::vec3(73,16.5,78),          glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.999, 0.999, 0.999), 2 },
-    {600, glm::vec3(50,681.6 - .27,81.6), glm::vec3(12,12,12),         glm::vec3(0,0,0), 0 }
-  };
+  std::vector<SphereInfo>& spheres = g_scenes[idx].spheres;
 
-  for (size_t i = 0; i < _countof(spheres); i++) {
+  for (size_t i = 0; i < spheres.size(); i++) {
     SphereInfo& s = spheres[i];
     D3D12_RAYTRACING_AABB aabb{};
     aabb.MinX = s.pos.x - s.radius;
@@ -534,7 +744,7 @@ void CreateAS() {
   CE(g_device12->CreateCommittedResource(
     &heap_props, D3D12_HEAP_FLAG_NONE, &res_desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&spheres_buf)));
   spheres_buf->Map(0, nullptr, &mapped);
-  memcpy(mapped, spheres, sizeof(SphereInfo)* aabbs.size());
+  memcpy(mapped, spheres.data(), sizeof(SphereInfo)* aabbs.size());
   spheres_buf->Unmap(0, nullptr);
 
   D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc{};
@@ -711,13 +921,37 @@ void CreateAS() {
   srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
   srv_desc.RaytracingAccelerationStructure.Location = tlas_result->GetGPUVirtualAddress();
   g_device12->CreateShaderResourceView(nullptr, &srv_desc, srv_handle);
+
+  g_frame_count = 0;
 }
 
 void Render() {
+  static float last_secs;
+  float secs = glfwGetTime();
+  float delta_secs = secs - last_secs;
+  last_secs = secs;
+
+  if (g_axes[0] != 0) {
+    g_cam_pos += g_cx * delta_secs * 10.0f * float(g_axes[0]);
+  }
+  if (g_axes[2] != 0) {
+    g_cam_pos += g_cy * delta_secs * 10.0f * float(g_axes[2]);
+  }
+  if (g_axes[1] != 0) {
+    g_cam_pos += g_cam_dir * delta_secs * 10.0f * float(g_axes[1]);
+  }
+
+  bool zeros = std::all_of(g_axes.begin(), g_axes.end(), [](char i) { return i == 0; });
+  if (!zeros) g_frame_count = 0;
+
   // Update
   RayGenCB cb{};
   cb.frame_count = g_frame_count;
-  g_frame_count++;
+  cb.cam_pos = g_cam_pos;
+  cb.cam_dir = g_cam_dir;
+  cb.cx = g_cx;
+  cb.cy = g_cy;
+  cb.recursion_depth = g_recursion_depth;
 
   char* mapped;
   d_raygen_cb->Map(0, nullptr, (void**)&mapped);
@@ -748,6 +982,13 @@ void Render() {
   barrier_rt_out.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
   barrier_rt_out.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
   g_command_list->ResourceBarrier(1, &barrier_rt_out);
+
+  if (g_frame_count == 0) {
+    D3D12_GPU_DESCRIPTOR_HANDLE handle_out_gpu(g_srv_uav_cbv_heap->GetGPUDescriptorHandleForHeapStart());
+    D3D12_CPU_DESCRIPTOR_HANDLE handle_out_cpu(g_srv_uav_cbv_heap->GetCPUDescriptorHandleForHeapStart());
+    uint32_t zeroes[] = { 0, 0, 0, 0 };
+    g_command_list->ClearUnorderedAccessViewUint(handle_out_gpu, handle_out_cpu, g_rt_output_resource, zeroes, 0, nullptr);
+  }
 
   D3D12_GPU_DESCRIPTOR_HANDLE srv_uav_cbv_handle(g_srv_uav_cbv_heap->GetGPUDescriptorHandleForHeapStart());
   g_command_list->SetComputeRootSignature(g_global_rootsig);
@@ -785,6 +1026,8 @@ void Render() {
   g_command_queue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&g_command_list);
   CE(g_swapchain->Present(1, 0));
   WaitForPreviousFrame();
+
+  g_frame_count++;
 }
 
 int main() {
@@ -798,7 +1041,7 @@ int main() {
   CreateRTPipeline();
   CreateShaderBindingTable();
 
-  CreateAS();
+  SetSceneAndCreateAS(1);
 
   while (!glfwWindowShouldClose(g_window))
   {
