@@ -165,7 +165,10 @@ void RayGen()
     uint4 seed;
     uint s1;
     if (frame_count == 0)
+    {
         s1 = tid.x + tid.y * dim.x;
+        RenderTarget[tid] = float4(0, 0, 0, 0);
+    }
     else
         s1 = Scratch[tid.x + tid.y * dim.x];
 
@@ -270,4 +273,10 @@ void Intersection()
             return;
 
     }
+}
+
+[shader("miss")]
+void Miss(inout RayPayload payload)
+{
+    // Don't do anything
 }

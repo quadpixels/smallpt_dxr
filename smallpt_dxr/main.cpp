@@ -603,7 +603,7 @@ void CreateRTPipeline() {
 
     // 1. DXIL Library
     IDxcBlob* dxil_library = CompileShaderLibrary(L"shaders/shaders.hlsl");
-    D3D12_EXPORT_DESC dxil_lib_exports[3];
+    D3D12_EXPORT_DESC dxil_lib_exports[4];
     dxil_lib_exports[0].Flags = D3D12_EXPORT_FLAG_NONE;
     dxil_lib_exports[0].ExportToRename = nullptr;
     dxil_lib_exports[0].Name = L"RayGen";
@@ -613,6 +613,9 @@ void CreateRTPipeline() {
     dxil_lib_exports[2].Flags = D3D12_EXPORT_FLAG_NONE;
     dxil_lib_exports[2].ExportToRename = nullptr;
     dxil_lib_exports[2].Name = L"Intersection";
+    dxil_lib_exports[3].Flags = D3D12_EXPORT_FLAG_NONE;
+    dxil_lib_exports[3].ExportToRename = nullptr;
+    dxil_lib_exports[3].Name = L"Miss";
 
     D3D12_DXIL_LIBRARY_DESC dxil_lib_desc{};
     dxil_lib_desc.DXILLibrary.pShaderBytecode = dxil_library->GetBufferPointer();
@@ -672,6 +675,7 @@ void CreateRTPipeline() {
 void CreateShaderBindingTable() {
   void* raygen_shader_id = g_rt_state_object_props->GetShaderIdentifier(L"RayGen");
   void* hitgroup_id      = g_rt_state_object_props->GetShaderIdentifier(L"HitGroup");
+  void* miss_id          = g_rt_state_object_props->GetShaderIdentifier(L"Miss");
 
   const int shader_record_size = 64;
 
@@ -680,7 +684,7 @@ void CreateShaderBindingTable() {
   sbt_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
   sbt_desc.Format = DXGI_FORMAT_UNKNOWN;
   sbt_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-  sbt_desc.Width = 128;
+  sbt_desc.Width = 192;  // Raygen + Hitgroup + Miss, 64B stride
   sbt_desc.Height = 1;
   sbt_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
   sbt_desc.SampleDesc.Count = 1;
@@ -700,6 +704,7 @@ void CreateShaderBindingTable() {
   g_sbt_storage->Map(0, nullptr, (void**)&mapped);
   memcpy(mapped, raygen_shader_id, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
   memcpy(mapped + 64, hitgroup_id, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+  memcpy(mapped + 128, miss_id, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
   g_sbt_storage->Unmap(0, nullptr);
   g_sbt_storage->SetName(L"RayGen SBT storage");
 }
@@ -992,13 +997,6 @@ void Render() {
   barrier_rt_out.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
   g_command_list->ResourceBarrier(1, &barrier_rt_out);
 
-  if (g_frame_count == 0) {
-    D3D12_GPU_DESCRIPTOR_HANDLE handle_out_gpu(g_srv_uav_cbv_heap->GetGPUDescriptorHandleForHeapStart());
-    D3D12_CPU_DESCRIPTOR_HANDLE handle_out_cpu(g_srv_uav_cbv_heap->GetCPUDescriptorHandleForHeapStart());
-    uint32_t zeroes[] = { 0, 0, 0, 0 };
-    g_command_list->ClearUnorderedAccessViewUint(handle_out_gpu, handle_out_cpu, g_rt_output_resource, zeroes, 0, nullptr);
-  }
-
   D3D12_GPU_DESCRIPTOR_HANDLE srv_uav_cbv_handle(g_srv_uav_cbv_heap->GetGPUDescriptorHandleForHeapStart());
   g_command_list->SetComputeRootSignature(g_global_rootsig);
   g_command_list->SetDescriptorHeaps(1, &g_srv_uav_cbv_heap);
@@ -1011,6 +1009,8 @@ void Render() {
   desc.HitGroupTable.StartAddress = g_sbt_storage->GetGPUVirtualAddress() + 64;
   desc.HitGroupTable.SizeInBytes = 32;
   desc.HitGroupTable.StrideInBytes = 32;
+  desc.MissShaderTable.StartAddress = g_sbt_storage->GetGPUVirtualAddress() + 128;
+  desc.MissShaderTable.SizeInBytes = 32;
   desc.Width = RT_W;
   desc.Height = RT_H;
   desc.Depth = 1;
